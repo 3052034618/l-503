@@ -303,28 +303,29 @@ function seedInitialData() {
   const equipmentCount = db.prepare('SELECT COUNT(*) as count FROM equipment').get() as { count: number }
   if (equipmentCount.count === 0) {
     const equipmentList = [
-      { id: 'equip-1', name: '跑步机1号', type: '有氧', brand: 'LifeFitness', zone_id: 'zone-1', max_usage_count: 2000, current_usage_count: 450 },
+      { id: 'equip-1', name: '跑步机1号', type: '有氧', brand: 'LifeFitness', zone_id: 'zone-1', max_usage_count: 2000, current_usage_count: 1700 },
       { id: 'equip-2', name: '跑步机2号', type: '有氧', brand: 'LifeFitness', zone_id: 'zone-1', max_usage_count: 2000, current_usage_count: 380 },
-      { id: 'equip-3', name: '动感单车A1', type: '有氧', brand: 'Keiser', zone_id: 'zone-1', max_usage_count: 1500, current_usage_count: 200 },
+      { id: 'equip-3', name: '动感单车A1', type: '有氧', brand: 'Keiser', zone_id: 'zone-1', max_usage_count: 1500, current_usage_count: 1250 },
       { id: 'equip-4', name: '椭圆机1号', type: '有氧', brand: 'Precor', zone_id: 'zone-1', max_usage_count: 2000, current_usage_count: 320 },
       { id: 'equip-5', name: '哑铃架', type: '力量', brand: 'Hammer', zone_id: 'zone-2', max_usage_count: 5000, current_usage_count: 1200 },
-      { id: 'equip-6', name: '杠铃架1号', type: '力量', brand: 'Eleiko', zone_id: 'zone-2', max_usage_count: 3000, current_usage_count: 800 },
-      { id: 'equip-7', name: '坐姿推胸器', type: '力量', brand: 'Technogym', zone_id: 'zone-2', max_usage_count: 2500, current_usage_count: 650 },
+      { id: 'equip-6', name: '杠铃架1号', type: '力量', brand: 'Eleiko', zone_id: 'zone-2', max_usage_count: 3000, current_usage_count: 2500 },
+      { id: 'equip-7', name: '坐姿推胸器', type: '力量', brand: 'Technogym', zone_id: 'zone-2', max_usage_count: 2500, current_usage_count: 2600 },
       { id: 'equip-8', name: '瑜伽垫套装', type: '瑜伽', brand: 'Manduka', zone_id: 'zone-5', max_usage_count: 1000, current_usage_count: 150 },
-      { id: 'equip-9', name: '私教训练床', type: '私教', brand: 'Stamina', zone_id: 'zone-6', max_usage_count: 1500, current_usage_count: 900 },
+      { id: 'equip-9', name: '私教训练床', type: '私教', brand: 'Stamina', zone_id: 'zone-6', max_usage_count: 1500, current_usage_count: 1480 },
       { id: 'equip-10', name: '搏击沙袋', type: '有氧', brand: 'Everlast', zone_id: 'zone-3', max_usage_count: 2000, current_usage_count: 1100 },
     ]
 
     const insertEquipment = db.prepare(`
       INSERT INTO equipment (id, name, type, brand, model, zone_id, purchase_date, max_usage_count, current_usage_count, status, created_at, updated_at)
-      VALUES (@id, @name, @type, @brand, '', @zone_id, @purchase_date, @max_usage_count, @current_usage_count, 'normal', @created_at, @updated_at)
+      VALUES (@id, @name, @type, @brand, '', @zone_id, @purchase_date, @max_usage_count, @current_usage_count, @status, @created_at, @updated_at)
     `)
 
     const now = new Date().toISOString()
     const purchaseDate = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString()
     const transaction = db.transaction(() => {
       for (const equip of equipmentList) {
-        insertEquipment.run({ ...equip, purchase_date: purchaseDate, created_at: now, updated_at: now })
+        const status = equip.current_usage_count >= equip.max_usage_count ? 'maintenance_required' : 'normal'
+        insertEquipment.run({ ...equip, status, purchase_date: purchaseDate, created_at: now, updated_at: now })
       }
     })
     transaction()

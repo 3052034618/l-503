@@ -73,7 +73,15 @@ export function getSchedules(params?: {
   }
 
   let sql = `
-    SELECT s.*, c.name as course_name, c.type as course_type, c.duration, c.calories_per_hour,
+    SELECT s.id, s.course_id, s.coach_id, s.zone_id, s.date, s.start_time, s.end_time,
+           s.capacity, s.status, s.is_private, s.member_id, s.notes, s.created_at, s.updated_at,
+           COALESCE((
+             SELECT COUNT(*) FROM enrollments e
+             WHERE e.schedule_id = s.id 
+               AND e.is_waitlist = 0 
+               AND e.status IN ('enrolled', 'checked_in', 'completed')
+           ), 0) as enrolled_count,
+           c.name as course_name, c.type as course_type, c.duration, c.calories_per_hour,
            co.name as coach_name, z.name as zone_name, m.name as member_name, m.level as member_level
     FROM schedules s
     LEFT JOIN courses c ON s.course_id = c.id
@@ -101,7 +109,15 @@ export function getSchedules(params?: {
 export function getScheduleById(id: string) {
   const db = getDb()
   return db.prepare(`
-    SELECT s.*, c.name as course_name, c.type as course_type, c.duration, c.calories_per_hour,
+    SELECT s.id, s.course_id, s.coach_id, s.zone_id, s.date, s.start_time, s.end_time,
+           s.capacity, s.status, s.is_private, s.member_id, s.notes, s.created_at, s.updated_at,
+           COALESCE((
+             SELECT COUNT(*) FROM enrollments e
+             WHERE e.schedule_id = s.id 
+               AND e.is_waitlist = 0 
+               AND e.status IN ('enrolled', 'checked_in', 'completed')
+           ), 0) as enrolled_count,
+           c.name as course_name, c.type as course_type, c.duration, c.calories_per_hour,
            co.name as coach_name, z.name as zone_name, m.name as member_name
     FROM schedules s
     LEFT JOIN courses c ON s.course_id = c.id
@@ -336,10 +352,20 @@ export function generateSchedule(date: string) {
   function matchMemberToCourse(member: any, course: any): number {
     const prefs = getMemberPreferences(member)
     let score = 0
-    if (prefs.includes(course.name)) score += 10
-    if (prefs.includes(course.type)) score += 5
+    const matchName = prefs.includes(course.name)
+    const matchType = prefs.includes(course.type)
+    const matchPrivate = prefs.includes('私教')
+    if (matchName) score += 10
+    if (matchType) score += 5
+    if (matchPrivate) score += 8
     score += LEVEL_ORDER[member.level] || 0
     return score
+  }
+
+  function isMemberMatchPrivateCourse(member: any, course: any): boolean {
+    const prefs = getMemberPreferences(member)
+    if (prefs.length === 0) return true
+    return prefs.includes('私教') || prefs.includes(course.name) || prefs.includes(course.type)
   }
 
   const tx = db.transaction(() => {
@@ -391,18 +417,17 @@ export function generateSchedule(date: string) {
         if (memberPrivateScheduled[member.id]) continue
         
         let matched = false
-        const memberPrefs = getMemberPreferences(member)
 
         for (const course of privateCourses) {
           if (matched) break
           
+          if (!isMemberMatchPrivateCourse(member, course)) continue
+
           for (const timeSlot of TIME_SLOTS) {
             if (matched) break
             
             const endTime = calculateEndTime(timeSlot, course.duration)
             const score = matchMemberToCourse(member, course)
-            
-            if (memberPrefs.length > 0 && score === 0) continue
 
             const coach = findCoachForCourse(course, timeSlot, endTime, true)
             if (!coach) continue

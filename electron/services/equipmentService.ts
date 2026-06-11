@@ -123,8 +123,8 @@ export function getMaintenanceReminders() {
     SELECT e.*, z.name as zone_name FROM equipment e
     LEFT JOIN zones z ON e.zone_id = z.id
     WHERE e.status = 'maintenance_required' 
-       OR (e.current_usage_count / e.max_usage_count) >= 0.8
-    ORDER BY (e.current_usage_count / e.max_usage_count) DESC
+       OR (CAST(e.current_usage_count AS REAL) / e.max_usage_count) >= 0.8
+    ORDER BY (CAST(e.current_usage_count AS REAL) / e.max_usage_count) DESC
   `).all()
 }
 

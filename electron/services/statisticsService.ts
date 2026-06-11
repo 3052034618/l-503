@@ -196,6 +196,72 @@ function getTimeStatistics(startDate?: string, endDate?: string) {
   return timeSlots
 }
 
+function buildAttendanceDetail(startDate?: string, endDate?: string) {
+  const db = getDb()
+  const { clause: sDateClause, params } = buildDateWhere('s', startDate, endDate)
+
+  return db.prepare(`
+    SELECT 
+      s.date,
+      s.start_time,
+      c.name as course_name,
+      c.type as course_type,
+      co.name as coach_name,
+      z.name as zone_name,
+      s.capacity,
+      (SELECT COUNT(*) FROM enrollments e 
+       WHERE e.schedule_id = s.id AND e.is_waitlist = 0 
+       AND e.status IN ('enrolled', 'checked_in', 'completed')) as enrolled,
+      (SELECT COUNT(*) FROM enrollments e 
+       WHERE e.schedule_id = s.id AND e.is_waitlist = 0 
+       AND e.status IN ('checked_in', 'completed')) as checked_in,
+      (SELECT COUNT(*) FROM enrollments e 
+       WHERE e.schedule_id = s.id AND e.is_waitlist = 0 
+       AND e.status = 'no_show') as no_show,
+      s.status as schedule_status
+    FROM schedules s
+    LEFT JOIN courses c ON s.course_id = c.id
+    LEFT JOIN coaches co ON s.coach_id = co.id
+    LEFT JOIN zones z ON s.zone_id = z.id
+    WHERE s.status != 'cancelled' ${sDateClause}
+    ORDER BY s.date ASC, s.start_time ASC
+  `).all(params).map((r: any) => ({
+    ...r,
+    attendance_rate: r.enrolled > 0 
+      ? `${Math.round((r.checked_in / r.enrolled) * 100)}%` 
+      : '-'
+  }))
+}
+
+function buildCaloriesDetail(startDate?: string, endDate?: string) {
+  const db = getDb()
+  const { clause: sDateClause, params } = buildDateWhere('s', startDate, endDate)
+
+  return db.prepare(`
+    SELECT 
+      s.date,
+      s.start_time,
+      c.name as course_name,
+      c.type as course_type,
+      c.calories_per_hour,
+      co.name as coach_name,
+      m.name as member_name,
+      m.level as member_level,
+      CASE WHEN e.status IN ('checked_in', 'completed') THEN e.calories_burned
+           ELSE COALESCE(e.calories_burned, ROUND(c.calories_per_hour * (c.duration / 60.0), 0))
+      END as calories,
+      e.status as enrollment_status,
+      e.satisfaction
+    FROM enrollments e
+    JOIN schedules s ON e.schedule_id = s.id
+    JOIN courses c ON s.course_id = c.id
+    LEFT JOIN coaches co ON s.coach_id = co.id
+    LEFT JOIN members m ON e.member_id = m.id
+    WHERE e.is_waitlist = 0 ${sDateClause}
+    ORDER BY s.date ASC, s.start_time ASC, c.name ASC
+  `).all(params)
+}
+
 export async function exportReport(params: any, filePath: string) {
   const { startDate, endDate } = params
 
@@ -211,6 +277,8 @@ export async function exportReport(params: any, filePath: string) {
     { header: '数值', key: 'value', width: 20 }
   ]
 
+  overviewSheet.addRow({ metric: '统计周期开始', value: startDate || '-' })
+  overviewSheet.addRow({ metric: '统计周期结束', value: endDate || '-' })
   overviewSheet.addRow({ metric: '课程总数', value: overviewData.totalSchedules })
   overviewSheet.addRow({ metric: '报名人次', value: overviewData.totalEnrollments })
   overviewSheet.addRow({ metric: '签到人次', value: overviewData.totalCheckIns })
@@ -254,6 +322,49 @@ export async function exportReport(params: any, filePath: string) {
 
   coachData.forEach((item: any) => {
     coachSheet.addRow(item)
+  })
+
+  const attendanceDetail = buildAttendanceDetail(startDate, endDate)
+
+  const attendanceSheet = workbook.addWorksheet('到课率明细')
+  attendanceSheet.columns = [
+    { header: '日期', key: 'date', width: 12 },
+    { header: '开始时间', key: 'start_time', width: 10 },
+    { header: '课程名称', key: 'course_name', width: 18 },
+    { header: '课程类型', key: 'course_type', width: 10 },
+    { header: '教练', key: 'coach_name', width: 12 },
+    { header: '场地', key: 'zone_name', width: 12 },
+    { header: '容量', key: 'capacity', width: 8 },
+    { header: '报名人数', key: 'enrolled', width: 10 },
+    { header: '签到人数', key: 'checked_in', width: 10 },
+    { header: '未到人数', key: 'no_show', width: 10 },
+    { header: '到课率', key: 'attendance_rate', width: 10 },
+    { header: '课程状态', key: 'schedule_status', width: 10 }
+  ]
+
+  attendanceDetail.forEach((item: any) => {
+    attendanceSheet.addRow(item)
+  })
+
+  const caloriesDetail = buildCaloriesDetail(startDate, endDate)
+
+  const caloriesSheet = workbook.addWorksheet('卡路里明细')
+  caloriesSheet.columns = [
+    { header: '日期', key: 'date', width: 12 },
+    { header: '时间', key: 'start_time', width: 10 },
+    { header: '课程名称', key: 'course_name', width: 18 },
+    { header: '课程类型', key: 'course_type', width: 10 },
+    { header: '教练', key: 'coach_name', width: 12 },
+    { header: '会员姓名', key: 'member_name', width: 12 },
+    { header: '会员等级', key: 'member_level', width: 10 },
+    { header: '课程卡路里/小时', key: 'calories_per_hour', width: 16 },
+    { header: '实际消耗卡路里', key: 'calories', width: 14 },
+    { header: '报名状态', key: 'enrollment_status', width: 10 },
+    { header: '满意度', key: 'satisfaction', width: 8 }
+  ]
+
+  caloriesDetail.forEach((item: any) => {
+    caloriesSheet.addRow(item)
   })
 
   await workbook.xlsx.writeFile(filePath)
@@ -343,7 +454,15 @@ export function getDashboardStats() {
   `).get() as { count: number }
 
   const todayScheduleList = db.prepare(`
-    SELECT s.*, c.name as course_name, c.type as course_type, 
+    SELECT s.id, s.course_id, s.coach_id, s.zone_id, s.date, s.start_time, s.end_time,
+           s.capacity, s.status, s.is_private, s.member_id, s.notes, s.created_at, s.updated_at,
+           COALESCE((
+             SELECT COUNT(*) FROM enrollments e
+             WHERE e.schedule_id = s.id 
+               AND e.is_waitlist = 0 
+               AND e.status IN ('enrolled', 'checked_in', 'completed')
+           ), 0) as enrolled_count,
+           c.name as course_name, c.type as course_type, 
            co.name as coach_name, z.name as zone_name
     FROM schedules s
     LEFT JOIN courses c ON s.course_id = c.id

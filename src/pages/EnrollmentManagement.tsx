@@ -142,8 +142,11 @@ const EnrollmentManagement = () => {
     }
   }
 
-  const normalEnrollments = enrollments.filter(e => e.is_waitlist === 0)
-  const waitlistEnrollments = enrollments.filter(e => e.is_waitlist === 1)
+  const normalEnrollments = enrollments.filter(
+    e => e.is_waitlist === 0 && ['enrolled', 'checked_in', 'completed'].includes(e.status)
+  )
+  const waitlistEnrollments = enrollments.filter(e => e.is_waitlist === 1 && e.status === 'enrolled')
+  const noShowEnrollments = enrollments.filter(e => e.is_waitlist === 0 && e.status === 'no_show')
 
   return (
     <div>
@@ -225,7 +228,7 @@ const EnrollmentManagement = () => {
 
               <div className="card">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                  <h3>报名列表 ({normalEnrollments.length}/{selectedSchedule.capacity})</h3>
+                  <h3>报名列表 ({selectedSchedule.enrolled_count}/{selectedSchedule.capacity})</h3>
                 </div>
 
                 {loading ? (
@@ -284,6 +287,40 @@ const EnrollmentManagement = () => {
                   <div className="empty-state">暂无报名</div>
                 )}
               </div>
+
+              {noShowEnrollments.length > 0 && (
+                <div className="card">
+                  <h3 style={{ marginBottom: 12, color: '#faad14' }}>超时未到 ({noShowEnrollments.length}人，已释放名额)</h3>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>会员姓名</th>
+                        <th>等级</th>
+                        <th>手机号</th>
+                        <th>报名时间</th>
+                        <th>状态</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {noShowEnrollments.map(e => (
+                        <tr key={e.id}>
+                          <td>{e.member_name}</td>
+                          <td>
+                            <span className="tag tag-blue">{e.member_level}</span>
+                          </td>
+                          <td>{e.member_phone || '-'}</td>
+                          <td>{e.enroll_time?.split('T')[1]?.split('.')[0] || '-'}</td>
+                          <td>
+                            <span className={`tag ${getStatusTag(e.status)}`}>
+                              {getStatusText(e.status)}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
 
               {waitlistEnrollments.length > 0 && (
                 <div className="card">
