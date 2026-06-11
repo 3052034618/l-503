@@ -2,6 +2,16 @@ import { getDb } from '../database'
 import { v4 as uuidv4 } from 'uuid'
 import { getScheduleById } from './scheduleService'
 import { getMemberById } from './memberService'
+import * as operationLogService from './operationLogService'
+
+function getMemberName(memberId: string): string {
+  try {
+    const m = getMemberById(memberId) as any
+    return m?.name || ''
+  } catch {
+    return ''
+  }
+}
 
 export interface Enrollment {
   id: string
@@ -115,6 +125,15 @@ export function enrollCourse(memberId: string, scheduleId: string) {
     db.prepare('UPDATE schedules SET enrolled_count = enrolled_count + 1 WHERE id = ?').run(scheduleId)
   }
 
+  const memberName = getMemberName(memberId)
+  operationLogService.createLog({
+    action: 'enroll',
+    schedule_id: scheduleId,
+    member_id: memberId,
+    member_name: memberName,
+    detail: isWaitlist ? `加入候补，位置：${waitlistPosition}` : '报名成功'
+  })
+
   return { 
     success: true, 
     message: isWaitlist ? '已加入候补名单' : '报名成功',
@@ -132,10 +151,10 @@ export function cancelEnrollment(enrollmentId: string) {
 
   db.prepare("UPDATE enrollments SET status = 'cancelled' WHERE id = ?").run(enrollmentId)
 
+  let promotedMember: any = null
   if (enrollment.is_waitlist === 0) {
     db.prepare('UPDATE schedules SET enrolled_count = enrolled_count - 1 WHERE id = ?').run(enrollment.schedule_id)
-    
-    promoteFirstWaitlist(enrollment.schedule_id)
+    promotedMember = promoteFirstWaitlist(enrollment.schedule_id, enrollment.member_id)
   } else {
     db.prepare(`
       UPDATE enrollments 
@@ -144,10 +163,27 @@ export function cancelEnrollment(enrollmentId: string) {
     `).run(enrollment.schedule_id, enrollment.waitlist_position)
   }
 
-  return { success: true, message: '已取消报名' }
+  const memberName = getMemberName(enrollment.member_id)
+  operationLogService.createLog({
+    action: 'cancel_enrollment',
+    schedule_id: enrollment.schedule_id,
+    member_id: enrollment.member_id,
+    member_name: memberName,
+    related_member_id: promotedMember?.member_id,
+    related_member_name: promotedMember?.member_name,
+    detail: promotedMember
+      ? `取消${enrollment.is_waitlist === 1 ? '候补' : '正式'}报名，候补递补：${promotedMember.member_name}`
+      : `取消${enrollment.is_waitlist === 1 ? '候补' : '正式'}报名`
+  })
+
+  return { 
+    success: true, 
+    message: '已取消报名', 
+    promoted: promotedMember 
+  }
 }
 
-function promoteFirstWaitlist(scheduleId: string): boolean {
+function promoteFirstWaitlist(scheduleId: string, cancelledMemberId?: string): any | null {
   const db = getDb()
   
   const firstWaitlist = db.prepare(`
@@ -171,6 +207,19 @@ function promoteFirstWaitlist(scheduleId: string): boolean {
       WHERE schedule_id = ? AND is_waitlist = 1 AND status = 'enrolled' AND waitlist_position > ?
     `).run(scheduleId, firstWaitlist.waitlist_position)
 
+    const memberName = getMemberName(firstWaitlist.member_id)
+    operationLogService.createLog({
+      action: 'waitlist_promoted',
+      schedule_id: scheduleId,
+      member_id: firstWaitlist.member_id,
+      member_name: memberName,
+      related_member_id: cancelledMemberId,
+      related_member_name: cancelledMemberId ? getMemberName(cancelledMemberId) : undefined,
+      detail: cancelledMemberId
+        ? `由候补转正（替补：${getMemberName(cancelledMemberId)}）`
+        : '由候补转正（超时未到自动递补）'
+    })
+
     createNotification({
       type: 'waitlist_promoted',
       title: '候补转正通知',
@@ -178,9 +227,9 @@ function promoteFirstWaitlist(scheduleId: string): boolean {
       target_type: 'member',
       target_id: firstWaitlist.member_id
     })
-    return true
+    return { member_id: firstWaitlist.member_id, member_name: memberName }
   }
-  return false
+  return null
 }
 
 export function checkInMember(enrollmentId: string) {
@@ -196,6 +245,15 @@ export function checkInMember(enrollmentId: string) {
 
   db.prepare("UPDATE enrollments SET status = 'checked_in', check_in_time = ? WHERE id = ?").run(now, enrollmentId)
 
+  const memberName = getMemberName(enrollment.member_id)
+  operationLogService.createLog({
+    action: 'check_in',
+    schedule_id: enrollment.schedule_id,
+    member_id: enrollment.member_id,
+    member_name: memberName,
+    detail: '会员签到成功'
+  })
+
   return { success: true, message: '签到成功' }
 }
 
@@ -210,6 +268,8 @@ export function releaseNoShows() {
   `).all() as any[]
 
   let releasedCount = 0
+  const releasedDetails: any[] = []
+  const promotedDetails: any[] = []
 
   const tx = db.transaction(() => {
     for (const schedule of schedules) {
@@ -225,20 +285,34 @@ export function releaseNoShows() {
         db.prepare("UPDATE enrollments SET status = 'no_show' WHERE id = ?").run(enrollment.id)
         db.prepare('UPDATE schedules SET enrolled_count = enrolled_count - 1 WHERE id = ?').run(schedule.id)
         releasedCount++
+        const memberName = getMemberName(enrollment.member_id)
+        releasedDetails.push({
+          member_id: enrollment.member_id,
+          member_name: memberName,
+          schedule_id: schedule.id
+        })
+        operationLogService.createLog({
+          action: 'release_no_show',
+          schedule_id: schedule.id,
+          member_id: enrollment.member_id,
+          member_name: memberName,
+          detail: '超时6小时未签到，自动释放名额'
+        })
       }
 
       for (let i = 0; i < noShows.length; i++) {
-        promoteFirstWaitlist(schedule.id)
+        const promoted = promoteFirstWaitlist(schedule.id, noShows[i].member_id)
+        if (promoted) promotedDetails.push(promoted)
       }
     }
   })
 
   try {
     tx()
-    return { releasedCount }
+    return { releasedCount, releasedDetails, promotedDetails }
   } catch (err: any) {
     console.error('Release no-shows error:', err)
-    return { releasedCount: 0, error: err.message }
+    return { releasedCount: 0, releasedDetails: [], promotedDetails: [], error: err.message }
   }
 }
 

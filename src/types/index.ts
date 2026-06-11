@@ -98,6 +98,9 @@ export interface Schedule {
   is_private: number
   member_id?: string
   member_name?: string
+  member_level?: string
+  member_preferences?: string
+  match_reason?: string
   calories_per_hour?: number
   notes?: string
   created_at: string

@@ -201,7 +201,24 @@ const ScheduleManagement = () => {
                     >
                       <div style={{ fontWeight: 'bold' }}>{schedule.course_name}</div>
                       <div>{schedule.coach_name} | {schedule.zone_name || '-'}</div>
+                      {schedule.is_private ? (
+                        <div style={{ fontSize: 12, opacity: 0.9 }}>
+                          👤 {schedule.member_name || '-'} ({schedule.member_level || '-'})
+                        </div>
+                      ) : null}
                       <div>{schedule.enrolled_count}/{schedule.capacity}人 {schedule.is_private ? '| 私教' : ''}</div>
+                      {schedule.is_private && schedule.match_reason && (
+                        <div style={{
+                          marginTop: 4,
+                          padding: '4px 6px',
+                          background: 'rgba(255,255,255,0.2)',
+                          borderRadius: 3,
+                          fontSize: 11,
+                          lineHeight: 1.4
+                        }}>
+                          💡 {schedule.match_reason}
+                        </div>
+                      )}
                       <div style={{ marginTop: 6, display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                         {schedule.status === 'pending' && (
                           <>

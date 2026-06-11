@@ -455,7 +455,7 @@ export function getDashboardStats() {
 
   const todayScheduleList = db.prepare(`
     SELECT s.id, s.course_id, s.coach_id, s.zone_id, s.date, s.start_time, s.end_time,
-           s.capacity, s.status, s.is_private, s.member_id, s.notes, s.created_at, s.updated_at,
+           s.capacity, s.status, s.is_private, s.member_id, s.notes, s.match_reason, s.created_at, s.updated_at,
            COALESCE((
              SELECT COUNT(*) FROM enrollments e
              WHERE e.schedule_id = s.id 
@@ -463,11 +463,13 @@ export function getDashboardStats() {
                AND e.status IN ('enrolled', 'checked_in', 'completed')
            ), 0) as enrolled_count,
            c.name as course_name, c.type as course_type, 
-           co.name as coach_name, z.name as zone_name
+           co.name as coach_name, z.name as zone_name,
+           m.name as member_name, m.level as member_level
     FROM schedules s
     LEFT JOIN courses c ON s.course_id = c.id
     LEFT JOIN coaches co ON s.coach_id = co.id
     LEFT JOIN zones z ON s.zone_id = z.id
+    LEFT JOIN members m ON s.member_id = m.id
     WHERE s.date = ? AND s.status != 'cancelled'
     ORDER BY s.start_time ASC
     LIMIT 6

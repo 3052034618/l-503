@@ -50,5 +50,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getHeatmapData: (date: string) => ipcRenderer.invoke('get-heatmap-data', date),
   getZones: () => ipcRenderer.invoke('get-zones'),
 
-  getDashboardStats: () => ipcRenderer.invoke('get-dashboard-stats')
+  getDashboardStats: () => ipcRenderer.invoke('get-dashboard-stats'),
+
+  getOperationLogs: (params?: any) => ipcRenderer.invoke('get-operation-logs', params),
+  getRecentLogs: (limit?: number) => ipcRenderer.invoke('get-recent-logs', limit)
 })

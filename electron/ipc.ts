@@ -6,6 +6,7 @@ import * as courseService from './services/courseService'
 import * as scheduleService from './services/scheduleService'
 import * as enrollmentService from './services/enrollmentService'
 import * as statisticsService from './services/statisticsService'
+import * as operationLogService from './services/operationLogService'
 
 export function registerIpcHandlers() {
   ipcMain.handle('get-members', async (_event, params) => {
@@ -184,5 +185,13 @@ export function registerIpcHandlers() {
 
   ipcMain.handle('get-dashboard-stats', async () => {
     return statisticsService.getDashboardStats()
+  })
+
+  ipcMain.handle('get-operation-logs', async (_event, params) => {
+    return operationLogService.getLogs(params)
+  })
+
+  ipcMain.handle('get-recent-logs', async (_event, limit) => {
+    return operationLogService.getRecentLogs(limit)
   })
 }

@@ -40,6 +40,7 @@ export function getSchedules(params?: {
   endDate?: string;
   coach_id?: string; 
   status?: string;
+  statuses?: string[];
   course_type?: string;
   is_private?: number;
 }) {
@@ -63,9 +64,14 @@ export function getSchedules(params?: {
     whereClause += ' AND s.coach_id = @coach_id'
     queryParams.coach_id = params.coach_id
   }
-  if (params?.status) {
+  if (params?.status && !params?.statuses) {
     whereClause += ' AND s.status = @status'
     queryParams.status = params.status
+  }
+  if (params?.statuses && params.statuses.length > 0) {
+    const placeholders = params.statuses.map((_, i) => `@status_${i}`).join(', ')
+    whereClause += ` AND s.status IN (${placeholders})`
+    params.statuses.forEach((s, i) => { queryParams[`status_${i}`] = s })
   }
   if (params?.is_private !== undefined) {
     whereClause += ' AND s.is_private = @is_private'
@@ -74,7 +80,7 @@ export function getSchedules(params?: {
 
   let sql = `
     SELECT s.id, s.course_id, s.coach_id, s.zone_id, s.date, s.start_time, s.end_time,
-           s.capacity, s.status, s.is_private, s.member_id, s.notes, s.created_at, s.updated_at,
+           s.capacity, s.status, s.is_private, s.member_id, s.notes, s.match_reason, s.created_at, s.updated_at,
            COALESCE((
              SELECT COUNT(*) FROM enrollments e
              WHERE e.schedule_id = s.id 
@@ -82,7 +88,7 @@ export function getSchedules(params?: {
                AND e.status IN ('enrolled', 'checked_in', 'completed')
            ), 0) as enrolled_count,
            c.name as course_name, c.type as course_type, c.duration, c.calories_per_hour,
-           co.name as coach_name, z.name as zone_name, m.name as member_name, m.level as member_level
+           co.name as coach_name, z.name as zone_name, m.name as member_name, m.level as member_level, m.preferences as member_preferences
     FROM schedules s
     LEFT JOIN courses c ON s.course_id = c.id
     LEFT JOIN coaches co ON s.coach_id = co.id
@@ -110,7 +116,7 @@ export function getScheduleById(id: string) {
   const db = getDb()
   return db.prepare(`
     SELECT s.id, s.course_id, s.coach_id, s.zone_id, s.date, s.start_time, s.end_time,
-           s.capacity, s.status, s.is_private, s.member_id, s.notes, s.created_at, s.updated_at,
+           s.capacity, s.status, s.is_private, s.member_id, s.notes, s.match_reason, s.created_at, s.updated_at,
            COALESCE((
              SELECT COUNT(*) FROM enrollments e
              WHERE e.schedule_id = s.id 
@@ -118,7 +124,7 @@ export function getScheduleById(id: string) {
                AND e.status IN ('enrolled', 'checked_in', 'completed')
            ), 0) as enrolled_count,
            c.name as course_name, c.type as course_type, c.duration, c.calories_per_hour,
-           co.name as coach_name, z.name as zone_name, m.name as member_name
+           co.name as coach_name, z.name as zone_name, m.name as member_name, m.preferences as member_preferences
     FROM schedules s
     LEFT JOIN courses c ON s.course_id = c.id
     LEFT JOIN coaches co ON s.coach_id = co.id
@@ -128,14 +134,14 @@ export function getScheduleById(id: string) {
   `).get(id)
 }
 
-export function createSchedule(schedule: Omit<Schedule, 'id' | 'created_at' | 'updated_at' | 'enrolled_count'>): any {
+export function createSchedule(schedule: Omit<Schedule, 'id' | 'created_at' | 'updated_at' | 'enrolled_count'> & { match_reason?: string }): any {
   const db = getDb()
   const now = new Date().toISOString()
   const id = uuidv4()
 
   const stmt = db.prepare(`
-    INSERT INTO schedules (id, course_id, coach_id, zone_id, date, start_time, end_time, capacity, enrolled_count, status, is_private, member_id, notes, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+    INSERT INTO schedules (id, course_id, coach_id, zone_id, date, start_time, end_time, capacity, enrolled_count, status, is_private, member_id, notes, match_reason, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
   `)
   stmt.run(
     id,
@@ -150,6 +156,7 @@ export function createSchedule(schedule: Omit<Schedule, 'id' | 'created_at' | 'u
     schedule.is_private,
     schedule.member_id || null,
     schedule.notes || null,
+    (schedule as any).match_reason || null,
     now,
     now
   )
@@ -461,12 +468,21 @@ export function generateSchedule(date: string) {
             
             const endTime = calculateEndTime(timeSlot, course.duration)
             const score = matchMemberToCourse(member, course)
+            const prefs = getMemberPreferences(member)
 
             const coach = findCoachForCourse(course, timeSlot, endTime, true)
             if (!coach) continue
 
             const zone = findZoneForCourse(course, timeSlot, endTime, true)
             if (!zone) continue
+
+            const reasons: string[] = []
+            if (prefs.includes('私教')) reasons.push('偏好含"私教"')
+            if (prefs.includes(course.name)) reasons.push(`偏好匹配课程：${course.name}`)
+            if (prefs.includes(course.type)) reasons.push(`偏好匹配类型：${course.type}`)
+            if (reasons.length === 0) reasons.push('综合匹配')
+            reasons.push(`会员等级：${member.level}`)
+            const matchReason = reasons.join('；')
 
             const schedule = createSchedule({
               course_id: course.id,
@@ -478,7 +494,8 @@ export function generateSchedule(date: string) {
               capacity: 1,
               status: 'pending',
               is_private: 1,
-              member_id: member.id
+              member_id: member.id,
+              match_reason: matchReason
             })
 
             generatedSchedules.push(schedule)

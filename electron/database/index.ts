@@ -118,11 +118,25 @@ function createTables() {
       is_private INTEGER DEFAULT 0,
       member_id TEXT,
       notes TEXT,
+      match_reason TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       FOREIGN KEY (course_id) REFERENCES courses(id),
       FOREIGN KEY (coach_id) REFERENCES coaches(id),
       FOREIGN KEY (zone_id) REFERENCES zones(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS operation_logs (
+      id TEXT PRIMARY KEY,
+      action TEXT NOT NULL,
+      schedule_id TEXT,
+      member_id TEXT,
+      member_name TEXT,
+      related_member_id TEXT,
+      related_member_name TEXT,
+      detail TEXT,
+      operator TEXT DEFAULT 'system',
+      created_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS enrollments (

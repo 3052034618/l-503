@@ -56,6 +56,9 @@ declare global {
       getZones: () => Promise<Zone[]>
 
       getDashboardStats: () => Promise<DashboardStats>
+
+      getOperationLogs: (params?: any) => Promise<any>
+      getRecentLogs: (limit?: number) => Promise<any>
     }
   }
 }
@@ -109,5 +112,7 @@ export const api = window.electronAPI || {
     activeMembers: 0,
     activeCoaches: 0,
     todayScheduleList: []
-  })
+  }),
+  getOperationLogs: async () => ({ list: [], total: 0 }),
+  getRecentLogs: async () => ({ list: [], total: 0 })
 }
