@@ -1,0 +1,51 @@
+{
+  "name": "fitness-scheduler",
+  "version": "1.0.0",
+  "description": "大型健身中心课程排课与设备调度桌面系统",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build && electron-builder",
+    "preview": "vite preview",
+    "electron:dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && tsc -p tsconfig.electron.json && electron .\"",
+    "electron:build": "vite build && tsc -p tsconfig.electron.json && electron-builder"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "dayjs": "^1.11.13",
+    "echarts": "^5.5.1",
+    "echarts-for-react": "^3.0.2",
+    "exceljs": "^4.4.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2",
+    "uuid": "^10.0.0",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.4",
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.5.5",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@types/uuid": "^10.0.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^9.0.1",
+    "electron": "^32.1.0",
+    "electron-builder": "^25.0.5",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.5",
+    "vite-plugin-electron": "^0.28.8",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.fitness.scheduler",
+    "productName": "健身中心排课系统",
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": "nsis"
+    }
+  }
+}
