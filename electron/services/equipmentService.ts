@@ -185,3 +185,8 @@ export function getZoneById(id: string) {
   const db = getDb()
   return db.prepare('SELECT * FROM zones WHERE id = ?').get(id)
 }
+
+export function getEquipmentByZone(zoneId: string) {
+  const db = getDb()
+  return db.prepare('SELECT * FROM equipment WHERE zone_id = ?').all(zoneId)
+}

@@ -1,10 +1,6 @@
 import { getDb } from '../database'
 import { v4 as uuidv4 } from 'uuid'
-import { getCoachById, getCoachDailyLoad } from './coachService'
-import { getCourseById } from './courseService'
-import { getZoneById, getZones } from './equipmentService'
-import { getMemberById } from './memberService'
-import dayjs from 'dayjs'
+import { getZones, getEquipmentByZone } from './equipmentService'
 
 export interface Schedule {
   id: string
@@ -28,6 +24,13 @@ const TIME_SLOTS = [
   '07:00', '08:00', '09:00', '10:00', '11:00',
   '14:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00'
 ]
+
+const LEVEL_ORDER: Record<string, number> = {
+  'VIP': 4,
+  '钻石': 3,
+  '黄金': 2,
+  '普通': 1
+}
 
 export function getSchedules(params?: { 
   page?: number; 
@@ -71,11 +74,12 @@ export function getSchedules(params?: {
 
   let sql = `
     SELECT s.*, c.name as course_name, c.type as course_type, c.duration, c.calories_per_hour,
-           co.name as coach_name, z.name as zone_name
+           co.name as coach_name, z.name as zone_name, m.name as member_name, m.level as member_level
     FROM schedules s
     LEFT JOIN courses c ON s.course_id = c.id
     LEFT JOIN coaches co ON s.coach_id = co.id
     LEFT JOIN zones z ON s.zone_id = z.id
+    LEFT JOIN members m ON s.member_id = m.id
     ${whereClause}
     ORDER BY s.date ASC, s.start_time ASC
   `
@@ -113,15 +117,26 @@ export function createSchedule(schedule: Omit<Schedule, 'id' | 'created_at' | 'u
   const now = new Date().toISOString()
   const id = uuidv4()
 
-  db.prepare(`
+  const stmt = db.prepare(`
     INSERT INTO schedules (id, course_id, coach_id, zone_id, date, start_time, end_time, capacity, enrolled_count, status, is_private, member_id, notes, created_at, updated_at)
-    VALUES (@id, @course_id, @coach_id, @zone_id, @date, @start_time, @end_time, @capacity, 0, @status, @is_private, @member_id, @notes, @created_at, @updated_at)
-  `).run({
-    ...schedule,
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+  `)
+  stmt.run(
     id,
-    created_at: now,
-    updated_at: now
-  })
+    schedule.course_id,
+    schedule.coach_id,
+    schedule.zone_id || null,
+    schedule.date,
+    schedule.start_time,
+    schedule.end_time,
+    schedule.capacity,
+    schedule.status,
+    schedule.is_private,
+    schedule.member_id || null,
+    schedule.notes || null,
+    now,
+    now
+  )
 
   return getScheduleById(id)
 }
@@ -131,7 +146,33 @@ export function updateScheduleStatus(id: string, status: string) {
   const now = new Date().toISOString()
   
   db.prepare('UPDATE schedules SET status = ?, updated_at = ? WHERE id = ?').run(status, now, id)
+
+  if (status === 'in_progress') {
+    incrementEquipmentUsageForSchedule(id)
+  }
+
   return getScheduleById(id)
+}
+
+function incrementEquipmentUsageForSchedule(scheduleId: string) {
+  const db = getDb()
+  const schedule = getScheduleById(scheduleId) as any
+  if (!schedule || !schedule.zone_id) return
+
+  const equipmentList = getEquipmentByZone(schedule.zone_id)
+  for (const equip of equipmentList) {
+    if (equip.status === 'normal') {
+      const newCount = equip.current_usage_count + 1
+      let newStatus = 'normal'
+      if (newCount >= equip.max_usage_count) {
+        newStatus = 'maintenance_required'
+      }
+      db.prepare(`
+        UPDATE equipment SET current_usage_count = ?, status = ?, updated_at = ?
+        WHERE id = ?
+      `).run(newCount, newStatus, new Date().toISOString(), equip.id)
+    }
+  }
 }
 
 export function confirmSchedule(id: string) {
@@ -143,38 +184,56 @@ export function cancelSchedule(id: string, reason: string) {
   const schedule = getScheduleById(id)
   if (!schedule) return undefined
 
-  updateScheduleStatus(id, 'cancelled')
-  
-  db.prepare(`
-    UPDATE enrollments SET status = 'cancelled' 
-    WHERE schedule_id = ? AND status IN ('enrolled', 'waitlist')
-  `).run(id)
+  const tx = db.transaction(() => {
+    db.prepare('UPDATE schedules SET status = ?, notes = ?, updated_at = ? WHERE id = ?').run(
+      'cancelled', reason, new Date().toISOString(), id
+    )
+    db.prepare(`
+      UPDATE enrollments SET status = 'cancelled' 
+      WHERE schedule_id = ? AND status IN ('enrolled', 'checked_in')
+    `).run(id)
+  })
+  tx()
 
   return getScheduleById(id)
+}
+
+export function deleteSchedulesByDate(date: string) {
+  const db = getDb()
+  const tx = db.transaction(() => {
+    const scheduleIds = db.prepare('SELECT id FROM schedules WHERE date = ? AND status = ?').all(date, 'pending') as any[]
+    for (const s of scheduleIds) {
+      db.prepare('DELETE FROM enrollments WHERE schedule_id = ?').run(s.id)
+    }
+    db.prepare('DELETE FROM schedules WHERE date = ? AND status = ?').run(date, 'pending')
+  })
+  tx()
+  return true
 }
 
 export function generateSchedule(date: string) {
   const db = getDb()
   
-  const existing = db.prepare('SELECT COUNT(*) as count FROM schedules WHERE date = ? AND status != ?').get(date, 'cancelled') as { count: number }
-  if (existing.count > 0) {
-    return { success: false, message: '该日期已有排课，如需重新生成请先删除现有排课' }
-  }
+  const existing = db.prepare('SELECT COUNT(*) as count FROM schedules WHERE date = ?').get(date) as { count: number }
 
-  const courses = db.prepare("SELECT * FROM courses WHERE is_private = 0 AND status IS NOT 'inactive'").all() as any[]
+  const courses = db.prepare('SELECT * FROM courses').all() as any[]
+  const groupCourses = courses.filter((c: any) => c.is_private === 0)
+  const privateCourses = courses.filter((c: any) => c.is_private === 1)
+  
   const coaches = db.prepare("SELECT * FROM coaches WHERE status = 'active'").all() as any[]
+  const members = db.prepare("SELECT * FROM members WHERE status = 'active' ORDER BY level DESC, join_date ASC").all() as any[]
   const zones = getZones() as any[]
 
-  const groupZones = zones.filter((z: any) => ['group', 'yoga', 'cardio'].includes(z.area_type))
-  
   const generatedSchedules: any[] = []
   const coachDailyLoad: Record<string, number> = {}
+  const coachTimeSlots: Record<string, string[]> = {}
   const zoneScheduleMap: Record<string, any[]> = {}
+  const memberPrivateScheduled: Record<string, boolean> = {}
 
   coaches.forEach(coach => {
     coachDailyLoad[coach.id] = 0
+    coachTimeSlots[coach.id] = []
   })
-
   zones.forEach(zone => {
     zoneScheduleMap[zone.id] = []
   })
@@ -195,15 +254,25 @@ export function generateSchedule(date: string) {
     if (!coach) return false
     if (coachDailyLoad[coachId] >= coach.max_daily_classes) return false
     
-    const coachSchedules = generatedSchedules.filter(s => s.coach_id === coachId)
-    return !coachSchedules.some(s => isTimeOverlap(startTime, endTime, s.start_time, s.end_time))
+    const slots = coachTimeSlots[coachId] || []
+    return !slots.some(slot => isTimeOverlap(startTime, endTime, slot.split('-')[0], slot.split('-')[1]))
   }
 
-  function findCoachForCourse(course: any, startTime: string, endTime: string) {
+  function reserveCoachTime(coachId: string, startTime: string, endTime: string) {
+    if (!coachTimeSlots[coachId]) coachTimeSlots[coachId] = []
+    coachTimeSlots[coachId].push(`${startTime}-${endTime}`)
+  }
+
+  function findCoachForCourse(course: any, startTime: string, endTime: string, isPrivate: boolean = false) {
     const suitableCoaches = coaches.filter(coach => {
-      const specialties = JSON.parse(coach.specialties || '[]')
+      let specialties: string[] = []
+      try { specialties = JSON.parse(coach.specialties || '[]') } catch {}
       return specialties.includes(course.name) || specialties.includes(course.type)
     })
+
+    if (suitableCoaches.length === 0) {
+      return coaches.find(c => isCoachAvailable(c.id, startTime, endTime)) || null
+    }
 
     suitableCoaches.sort((a, b) => coachDailyLoad[a.id] - coachDailyLoad[b.id])
 
@@ -215,8 +284,15 @@ export function generateSchedule(date: string) {
     return null
   }
 
-  function findZoneForCourse(course: any, startTime: string, endTime: string) {
-    let suitableZones = groupZones
+  function findZoneForCourse(course: any, startTime: string, endTime: string, isPrivate: boolean = false) {
+    if (isPrivate) {
+      const privateZones = zones.filter((z: any) => z.area_type === 'private')
+      for (const zone of privateZones) {
+        if (isZoneAvailable(zone.id, startTime, endTime)) return zone
+      }
+    }
+
+    let suitableZones = zones.filter((z: any) => ['group', 'yoga', 'cardio', 'strength'].includes(z.area_type))
     
     if (course.type === '瑜伽') {
       suitableZones = zones.filter((z: any) => z.area_type === 'yoga')
@@ -234,50 +310,142 @@ export function generateSchedule(date: string) {
     return null
   }
 
-  function calculateEndTime(startTime: string, duration: number) {
-    const [hour, minute] = startTime.split(':').map(Number)
-    const endDate = new Date()
-    endDate.setHours(hour, minute + duration, 0)
-    return `${String(endDate.getHours()).padStart(2, '0')}:${String(endDate.getMinutes()).padStart(2, '0')}`
+  function checkZoneEquipmentAvailable(zoneId: string): boolean {
+    const equipmentList = getEquipmentByZone(zoneId)
+    if (equipmentList.length === 0) return true
+    const locked = equipmentList.filter(e => e.status === 'maintenance_required')
+    return locked.length < equipmentList.length
   }
 
-  for (const timeSlot of TIME_SLOTS) {
-    for (const course of courses) {
-      if (course.is_private === 1) continue
+  function calculateEndTime(startTime: string, duration: number) {
+    const [hour, minute] = startTime.split(':').map(Number)
+    const totalMinutes = hour * 60 + minute + duration
+    const endHour = Math.floor(totalMinutes / 60) % 24
+    const endMinute = totalMinutes % 60
+    return `${String(endHour).padStart(2, '0')}:${String(endMinute).padStart(2, '0')}`
+  }
 
-      const endTime = calculateEndTime(timeSlot, course.duration)
-      
-      const coach = findCoachForCourse(course, timeSlot, endTime)
-      if (!coach) continue
-
-      const zone = findZoneForCourse(course, timeSlot, endTime)
-      if (!zone) continue
-
-      const capacity = Math.min(course.capacity, zone.capacity || 999)
-
-      const schedule = createSchedule({
-        course_id: course.id,
-        coach_id: coach.id,
-        zone_id: zone.id,
-        date,
-        start_time: timeSlot,
-        end_time: endTime,
-        capacity,
-        status: 'pending',
-        is_private: 0
-      })
-
-      generatedSchedules.push(schedule)
-      coachDailyLoad[coach.id]++
-      zoneScheduleMap[zone.id].push({ start_time: timeSlot, end_time: endTime })
+  function getMemberPreferences(member: any): string[] {
+    try {
+      return JSON.parse(member.preferences || '[]')
+    } catch {
+      return []
     }
   }
 
-  return { 
-    success: true, 
-    message: `成功生成 ${generatedSchedules.length} 节课程`,
-    count: generatedSchedules.length,
-    schedules: generatedSchedules 
+  function matchMemberToCourse(member: any, course: any): number {
+    const prefs = getMemberPreferences(member)
+    let score = 0
+    if (prefs.includes(course.name)) score += 10
+    if (prefs.includes(course.type)) score += 5
+    score += LEVEL_ORDER[member.level] || 0
+    return score
+  }
+
+  const tx = db.transaction(() => {
+    if (existing.count > 0) {
+      deleteSchedulesByDate(date)
+    }
+
+    for (const timeSlot of TIME_SLOTS) {
+      for (const course of groupCourses) {
+        const endTime = calculateEndTime(timeSlot, course.duration)
+        
+        const coach = findCoachForCourse(course, timeSlot, endTime, false)
+        if (!coach) continue
+
+        const zone = findZoneForCourse(course, timeSlot, endTime, false)
+        if (!zone) continue
+
+        if (!checkZoneEquipmentAvailable(zone.id)) continue
+
+        const capacity = Math.min(course.capacity, zone.capacity || 999)
+
+        const schedule = createSchedule({
+          course_id: course.id,
+          coach_id: coach.id,
+          zone_id: zone.id,
+          date,
+          start_time: timeSlot,
+          end_time: endTime,
+          capacity,
+          status: 'pending',
+          is_private: 0
+        })
+
+        generatedSchedules.push(schedule)
+        coachDailyLoad[coach.id]++
+        reserveCoachTime(coach.id, timeSlot, endTime)
+        zoneScheduleMap[zone.id].push({ start_time: timeSlot, end_time: endTime })
+      }
+    }
+
+    const sortedMembers = [...members].sort((a, b) => {
+      const la = LEVEL_ORDER[a.level] || 0
+      const lb = LEVEL_ORDER[b.level] || 0
+      return lb - la
+    })
+
+    if (privateCourses.length > 0) {
+      for (const member of sortedMembers) {
+        if (memberPrivateScheduled[member.id]) continue
+        
+        let matched = false
+        const memberPrefs = getMemberPreferences(member)
+
+        for (const course of privateCourses) {
+          if (matched) break
+          
+          for (const timeSlot of TIME_SLOTS) {
+            if (matched) break
+            
+            const endTime = calculateEndTime(timeSlot, course.duration)
+            const score = matchMemberToCourse(member, course)
+            
+            if (memberPrefs.length > 0 && score === 0) continue
+
+            const coach = findCoachForCourse(course, timeSlot, endTime, true)
+            if (!coach) continue
+
+            const zone = findZoneForCourse(course, timeSlot, endTime, true)
+            if (!zone) continue
+
+            const schedule = createSchedule({
+              course_id: course.id,
+              coach_id: coach.id,
+              zone_id: zone.id,
+              date,
+              start_time: timeSlot,
+              end_time: endTime,
+              capacity: 1,
+              status: 'pending',
+              is_private: 1,
+              member_id: member.id
+            })
+
+            generatedSchedules.push(schedule)
+            coachDailyLoad[coach.id]++
+            reserveCoachTime(coach.id, timeSlot, endTime)
+            zoneScheduleMap[zone.id].push({ start_time: timeSlot, end_time: endTime })
+            memberPrivateScheduled[member.id] = true
+            matched = true
+          }
+        }
+      }
+    }
+  })
+
+  try {
+    tx()
+    return { 
+      success: true, 
+      message: `成功生成 ${generatedSchedules.length} 节课程（团课 ${generatedSchedules.filter(s => !s.is_private).length} 节，私教 ${generatedSchedules.filter(s => s.is_private).length} 节）`,
+      count: generatedSchedules.length,
+      schedules: generatedSchedules 
+    }
+  } catch (err: any) {
+    console.error('Generate schedule error:', err)
+    return { success: false, message: '生成排课失败：' + err.message }
   }
 }
 
@@ -322,13 +490,18 @@ export function requestAdjustment(scheduleId: string, adjustment: any) {
 
   db.prepare(`
     INSERT INTO adjustment_requests (id, schedule_id, requester_id, requester_type, request_type, original_data, requested_data, reason, status, created_at)
-    VALUES (@id, @schedule_id, @requester_id, @requester_type, @request_type, @original_data, @requested_data, @reason, 'pending', @created_at)
-  `).run({
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+  `).run(
     id,
-    schedule_id: scheduleId,
-    ...adjustment,
-    created_at: now
-  })
+    scheduleId,
+    adjustment.requester_id || null,
+    adjustment.requester_type || 'operator',
+    adjustment.request_type,
+    adjustment.original_data || null,
+    adjustment.requested_data || null,
+    adjustment.reason || null,
+    now
+  )
 
   return { id, ...adjustment }
 }
@@ -337,33 +510,42 @@ export function approveAdjustment(requestId: string) {
   const db = getDb()
   const now = new Date().toISOString()
   
-  const request = db.prepare('SELECT * FROM adjustment_requests WHERE id = ?').get(requestId) as any
-  if (!request) return { success: false, message: '申请不存在' }
+  const tx = db.transaction(() => {
+    const request = db.prepare('SELECT * FROM adjustment_requests WHERE id = ?').get(requestId) as any
+    if (!request) return { success: false, message: '申请不存在' }
 
-  const requestedData = JSON.parse(request.requested_data || '{}')
+    db.prepare(`
+      UPDATE adjustment_requests 
+      SET status = 'approved', approver_id = ?, approve_time = ?
+      WHERE id = ?
+    `).run('admin', now, requestId)
 
-  db.prepare(`
-    UPDATE adjustment_requests 
-    SET status = 'approved', approver_id = ?, approve_time = ?
-    WHERE id = ?
-  `).run('admin', now, requestId)
+    if (request.request_type === 'reschedule' || request.request_type === 'modify') {
+      let requestedData: any = {}
+      try { requestedData = JSON.parse(request.requested_data || '{}') } catch {}
 
-  if (request.request_type === 'reschedule' || request.request_type === 'modify') {
-    const updateData: any = {}
-    if (requestedData.start_time) updateData.start_time = requestedData.start_time
-    if (requestedData.end_time) updateData.end_time = requestedData.end_time
-    if (requestedData.coach_id) updateData.coach_id = requestedData.coach_id
-    if (requestedData.zone_id) updateData.zone_id = requestedData.zone_id
-    if (requestedData.capacity) updateData.capacity = requestedData.capacity
-
-    if (Object.keys(updateData).length > 0) {
+      const updateData: any = {}
+      if (requestedData.start_time) updateData.start_time = requestedData.start_time
+      if (requestedData.end_time) updateData.end_time = requestedData.end_time
+      if (requestedData.coach_id) updateData.coach_id = requestedData.coach_id
+      if (requestedData.zone_id) updateData.zone_id = requestedData.zone_id
+      if (requestedData.capacity) updateData.capacity = requestedData.capacity
       updateData.updated_at = now
-      const setClause = Object.keys(updateData).map(k => `${k} = @${k}`).join(', ')
-      db.prepare(`UPDATE schedules SET ${setClause} WHERE id = @id`).run({ ...updateData, id: request.schedule_id })
-    }
-  }
 
-  return { success: true, message: '已批准调整' }
+      if (Object.keys(updateData).length > 0) {
+        const fields = Object.keys(updateData).map(k => `${k} = ?`).join(', ')
+        const values = [...Object.values(updateData), request.schedule_id]
+        db.prepare(`UPDATE schedules SET ${fields} WHERE id = ?`).run(...values)
+      }
+    }
+  })
+
+  try {
+    tx()
+    return { success: true, message: '已批准调整' }
+  } catch (err: any) {
+    return { success: false, message: err.message }
+  }
 }
 
 export function rejectAdjustment(requestId: string, reason: string) {

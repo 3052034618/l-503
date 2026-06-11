@@ -147,7 +147,7 @@ export function cancelEnrollment(enrollmentId: string) {
   return { success: true, message: '已取消报名' }
 }
 
-function promoteFirstWaitlist(scheduleId: string) {
+function promoteFirstWaitlist(scheduleId: string): boolean {
   const db = getDb()
   
   const firstWaitlist = db.prepare(`
@@ -178,7 +178,9 @@ function promoteFirstWaitlist(scheduleId: string) {
       target_type: 'member',
       target_id: firstWaitlist.member_id
     })
+    return true
   }
+  return false
 }
 
 export function checkInMember(enrollmentId: string) {
@@ -200,38 +202,44 @@ export function checkInMember(enrollmentId: string) {
 export function releaseNoShows() {
   const db = getDb()
   const now = new Date()
-  const sixHoursAgo = new Date(now.getTime() - 6 * 60 * 60 * 1000).toISOString()
 
   const schedules = db.prepare(`
-    SELECT s.id, s.date, s.start_time
+    SELECT s.id, s.date, s.start_time, s.capacity, s.enrolled_count
     FROM schedules s
     WHERE s.status = 'confirmed'
   `).all() as any[]
 
   let releasedCount = 0
 
-  for (const schedule of schedules) {
-    const scheduleDateTime = new Date(`${schedule.date}T${schedule.start_time}:00`)
-    if (now.getTime() - scheduleDateTime.getTime() > 6 * 60 * 60 * 1000) {
-      const noShows = db.prepare(`
-        SELECT * FROM enrollments 
-        WHERE schedule_id = ? AND status = 'enrolled' AND is_waitlist = 0
-      `).all(schedule.id) as any[]
+  const tx = db.transaction(() => {
+    for (const schedule of schedules) {
+      const scheduleDateTime = new Date(`${schedule.date}T${schedule.start_time}:00`)
+      if (now.getTime() - scheduleDateTime.getTime() > 6 * 60 * 60 * 1000) {
+        const noShows = db.prepare(`
+          SELECT * FROM enrollments 
+          WHERE schedule_id = ? AND status = 'enrolled' AND is_waitlist = 0
+        `).all(schedule.id) as any[]
 
-      for (const enrollment of noShows) {
-        db.prepare("UPDATE enrollments SET status = 'no_show' WHERE id = ?").run(enrollment.id)
-        releasedCount++
-      }
+        for (const enrollment of noShows) {
+          db.prepare("UPDATE enrollments SET status = 'no_show' WHERE id = ?").run(enrollment.id)
+          db.prepare('UPDATE schedules SET enrolled_count = enrolled_count - 1 WHERE id = ?').run(schedule.id)
+          releasedCount++
+        }
 
-      if (noShows.length > 0) {
         for (let i = 0; i < noShows.length; i++) {
           promoteFirstWaitlist(schedule.id)
         }
       }
     }
-  }
+  })
 
-  return { releasedCount }
+  try {
+    tx()
+    return { releasedCount }
+  } catch (err: any) {
+    console.error('Release no-shows error:', err)
+    return { releasedCount: 0, error: err.message }
+  }
 }
 
 function createNotification(notification: Omit<any, 'id' | 'created_at' | 'is_read'>) {

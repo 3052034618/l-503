@@ -8,53 +8,55 @@ export function getStatistics(params: {
   startDate?: string
   endDate?: string
 }) {
-  const db = getDb()
   const { type, startDate, endDate } = params
-
-  let dateFilter = ''
-  const queryParams: any = {}
-
-  if (startDate) {
-    dateFilter += ' AND s.date >= @startDate'
-    queryParams.startDate = startDate
-  }
-  if (endDate) {
-    dateFilter += ' AND s.date <= @endDate'
-    queryParams.endDate = endDate
-  }
 
   switch (type) {
     case 'course':
-      return getCourseStatistics(dateFilter, queryParams)
+      return getCourseStatistics(startDate, endDate)
     case 'coach':
-      return getCoachStatistics(dateFilter, queryParams)
+      return getCoachStatistics(startDate, endDate)
     case 'time':
-      return getTimeStatistics(dateFilter, queryParams)
+      return getTimeStatistics(startDate, endDate)
     case 'overview':
     default:
-      return getOverviewStatistics(dateFilter, queryParams)
+      return getOverviewStatistics(startDate, endDate)
   }
 }
 
-function getOverviewStatistics(dateFilter: string, queryParams: any) {
+function buildDateWhere(tableAlias: string, startDate?: string, endDate?: string): { clause: string; params: any } {
+  let clause = ''
+  const params: any = {}
+  if (startDate) {
+    clause += ` AND ${tableAlias}.date >= @startDate`
+    params.startDate = startDate
+  }
+  if (endDate) {
+    clause += ` AND ${tableAlias}.date <= @endDate`
+    params.endDate = endDate
+  }
+  return { clause, params }
+}
+
+function getOverviewStatistics(startDate?: string, endDate?: string) {
   const db = getDb()
+  const { clause: sDateClause, params } = buildDateWhere('s', startDate, endDate)
 
   const totalSchedules = db.prepare(`
     SELECT COUNT(*) as count FROM schedules s 
-    WHERE s.status != 'cancelled' ${dateFilter}
-  `).get(queryParams) as { count: number }
+    WHERE s.status != 'cancelled' ${sDateClause}
+  `).get(params) as { count: number }
 
   const totalEnrollments = db.prepare(`
     SELECT COUNT(*) as count FROM enrollments e
     JOIN schedules s ON e.schedule_id = s.id
-    WHERE e.status IN ('enrolled', 'checked_in', 'completed') ${dateFilter}
-  `).get(queryParams) as { count: number }
+    WHERE e.status IN ('enrolled', 'checked_in', 'completed') ${sDateClause}
+  `).get(params) as { count: number }
 
   const totalCheckIns = db.prepare(`
     SELECT COUNT(*) as count FROM enrollments e
     JOIN schedules s ON e.schedule_id = s.id
-    WHERE e.status IN ('checked_in', 'completed') ${dateFilter}
-  `).get(queryParams) as { count: number }
+    WHERE e.status IN ('checked_in', 'completed') ${sDateClause}
+  `).get(params) as { count: number }
 
   const avgAttendanceRate = totalEnrollments.count > 0 
     ? Math.round((totalCheckIns.count / totalEnrollments.count) * 100) 
@@ -63,14 +65,14 @@ function getOverviewStatistics(dateFilter: string, queryParams: any) {
   const totalCalories = db.prepare(`
     SELECT COALESCE(SUM(e.calories_burned), 0) as total FROM enrollments e
     JOIN schedules s ON e.schedule_id = s.id
-    WHERE e.calories_burned IS NOT NULL ${dateFilter}
-  `).get(queryParams) as { total: number }
+    WHERE e.calories_burned IS NOT NULL ${sDateClause}
+  `).get(params) as { total: number }
 
   const avgSatisfaction = db.prepare(`
     SELECT COALESCE(AVG(e.satisfaction), 0) as avg FROM enrollments e
     JOIN schedules s ON e.schedule_id = s.id
-    WHERE e.satisfaction IS NOT NULL ${dateFilter}
-  `).get(queryParams) as { avg: number }
+    WHERE e.satisfaction IS NOT NULL ${sDateClause}
+  `).get(params) as { avg: number }
 
   const totalMembers = db.prepare("SELECT COUNT(*) as count FROM members WHERE status = 'active'").get() as { count: number }
   const totalCoaches = db.prepare("SELECT COUNT(*) as count FROM coaches WHERE status = 'active'").get() as { count: number }
@@ -87,8 +89,11 @@ function getOverviewStatistics(dateFilter: string, queryParams: any) {
   }
 }
 
-function getCourseStatistics(dateFilter: string, queryParams: any) {
+function getCourseStatistics(startDate?: string, endDate?: string) {
   const db = getDb()
+  const { clause: sDateClause, params } = buildDateWhere('s', startDate, endDate)
+  const { clause: s2DateClause, params: s2Params } = buildDateWhere('s2', startDate, endDate)
+  const allParams = { ...params, ...s2Params }
 
   const courses = db.prepare(`
     SELECT 
@@ -96,40 +101,31 @@ function getCourseStatistics(dateFilter: string, queryParams: any) {
       c.name as course_name,
       c.type as course_type,
       COUNT(s.id) as schedule_count,
-      COALESCE(SUM(e_count.total), 0) as total_enrollments,
-      COALESCE(SUM(e_checkin.total), 0) as total_checkins,
-      COALESCE(AVG(e_satisfaction.avg), 0) as avg_satisfaction,
-      COALESCE(SUM(e_calories.total), 0) as total_calories
+      COALESCE(SUM(
+        (SELECT COUNT(*) FROM enrollments e 
+         WHERE e.schedule_id = s.id 
+         AND e.status IN ('enrolled', 'checked_in', 'completed'))
+      ), 0) as total_enrollments,
+      COALESCE(SUM(
+        (SELECT COUNT(*) FROM enrollments e 
+         WHERE e.schedule_id = s.id 
+         AND e.status IN ('checked_in', 'completed'))
+      ), 0) as total_checkins,
+      COALESCE((
+        SELECT AVG(e.satisfaction) FROM enrollments e
+        JOIN schedules s2 ON e.schedule_id = s2.id
+        WHERE s2.course_id = c.id AND e.satisfaction IS NOT NULL ${s2DateClause}
+      ), 0) as avg_satisfaction,
+      COALESCE((
+        SELECT SUM(e.calories_burned) FROM enrollments e
+        JOIN schedules s2 ON e.schedule_id = s2.id
+        WHERE s2.course_id = c.id AND e.calories_burned IS NOT NULL ${s2DateClause}
+      ), 0) as total_calories
     FROM courses c
-    LEFT JOIN schedules s ON c.id = s.course_id AND s.status != 'cancelled'
-    LEFT JOIN (
-      SELECT schedule_id, COUNT(*) as total FROM enrollments 
-      WHERE status IN ('enrolled', 'checked_in', 'completed')
-      GROUP BY schedule_id
-    ) e_count ON s.id = e_count.schedule_id
-    LEFT JOIN (
-      SELECT schedule_id, COUNT(*) as total FROM enrollments 
-      WHERE status IN ('checked_in', 'completed')
-      GROUP BY schedule_id
-    ) e_checkin ON s.id = e_checkin.schedule_id
-    LEFT JOIN (
-      SELECT s2.course_id, AVG(e.satisfaction) as avg 
-      FROM enrollments e
-      JOIN schedules s2 ON e.schedule_id = s2.id
-      WHERE e.satisfaction IS NOT NULL
-      GROUP BY s2.course_id
-    ) e_satisfaction ON c.id = e_satisfaction.course_id
-    LEFT JOIN (
-      SELECT s2.course_id, SUM(e.calories_burned) as total 
-      FROM enrollments e
-      JOIN schedules s2 ON e.schedule_id = s2.id
-      WHERE e.calories_burned IS NOT NULL
-      GROUP BY s2.course_id
-    ) e_calories ON c.id = e_calories.course_id
-    WHERE 1=1 ${dateFilter.replace(/s\./g, 's2.')}
+    LEFT JOIN schedules s ON c.id = s.course_id AND s.status != 'cancelled' ${sDateClause}
     GROUP BY c.id, c.name, c.type
     ORDER BY total_enrollments DESC
-  `).all(queryParams)
+  `).all(allParams)
 
   return courses.map((c: any) => ({
     ...c,
@@ -140,42 +136,37 @@ function getCourseStatistics(dateFilter: string, queryParams: any) {
   }))
 }
 
-function getCoachStatistics(dateFilter: string, queryParams: any) {
+function getCoachStatistics(startDate?: string, endDate?: string) {
   const db = getDb()
+  const { clause: sDateClause, params } = buildDateWhere('s', startDate, endDate)
+  const { clause: s2DateClause, params: s2Params } = buildDateWhere('s2', startDate, endDate)
+  const allParams = { ...params, ...s2Params }
 
   const coaches = db.prepare(`
     SELECT 
       co.id,
       co.name as coach_name,
       COUNT(s.id) as schedule_count,
-      COALESCE(SUM(e_count.total), 0) as total_students,
-      COALESCE(AVG(e_satisfaction.avg), 0) as avg_satisfaction,
-      COALESCE(SUM(e_calories.total), 0) as total_calories
+      COALESCE(SUM(
+        (SELECT COUNT(*) FROM enrollments e 
+         WHERE e.schedule_id = s.id 
+         AND e.status IN ('enrolled', 'checked_in', 'completed'))
+      ), 0) as total_students,
+      COALESCE((
+        SELECT AVG(e.satisfaction) FROM enrollments e
+        JOIN schedules s2 ON e.schedule_id = s2.id
+        WHERE s2.coach_id = co.id AND e.satisfaction IS NOT NULL ${s2DateClause}
+      ), 0) as avg_satisfaction,
+      COALESCE((
+        SELECT SUM(e.calories_burned) FROM enrollments e
+        JOIN schedules s2 ON e.schedule_id = s2.id
+        WHERE s2.coach_id = co.id AND e.calories_burned IS NOT NULL ${s2DateClause}
+      ), 0) as total_calories
     FROM coaches co
-    LEFT JOIN schedules s ON co.id = s.coach_id AND s.status != 'cancelled'
-    LEFT JOIN (
-      SELECT schedule_id, COUNT(*) as total FROM enrollments 
-      WHERE status IN ('enrolled', 'checked_in', 'completed')
-      GROUP BY schedule_id
-    ) e_count ON s.id = e_count.schedule_id
-    LEFT JOIN (
-      SELECT s2.coach_id, AVG(e.satisfaction) as avg 
-      FROM enrollments e
-      JOIN schedules s2 ON e.schedule_id = s2.id
-      WHERE e.satisfaction IS NOT NULL
-      GROUP BY s2.coach_id
-    ) e_satisfaction ON co.id = e_satisfaction.coach_id
-    LEFT JOIN (
-      SELECT s2.coach_id, SUM(e.calories_burned) as total 
-      FROM enrollments e
-      JOIN schedules s2 ON e.schedule_id = s2.id
-      WHERE e.calories_burned IS NOT NULL
-      GROUP BY s2.coach_id
-    ) e_calories ON co.id = e_calories.coach_id
-    WHERE 1=1 ${dateFilter.replace(/s\./g, 's2.')}
+    LEFT JOIN schedules s ON co.id = s.coach_id AND s.status != 'cancelled' ${sDateClause}
     GROUP BY co.id, co.name
     ORDER BY total_students DESC
-  `).all(queryParams)
+  `).all(allParams)
 
   return coaches.map((c: any) => ({
     ...c,
@@ -183,42 +174,36 @@ function getCoachStatistics(dateFilter: string, queryParams: any) {
   }))
 }
 
-function getTimeStatistics(dateFilter: string, queryParams: any) {
+function getTimeStatistics(startDate?: string, endDate?: string) {
   const db = getDb()
+  const { clause: sDateClause, params } = buildDateWhere('s', startDate, endDate)
 
   const timeSlots = db.prepare(`
     SELECT 
       s.start_time,
       COUNT(s.id) as schedule_count,
-      COALESCE(SUM(e_count.total), 0) as total_students
+      COALESCE(SUM(
+        (SELECT COUNT(*) FROM enrollments e 
+         WHERE e.schedule_id = s.id 
+         AND e.status IN ('enrolled', 'checked_in', 'completed'))
+      ), 0) as total_students
     FROM schedules s
-    LEFT JOIN (
-      SELECT schedule_id, COUNT(*) as total FROM enrollments 
-      WHERE status IN ('enrolled', 'checked_in', 'completed')
-      GROUP BY schedule_id
-    ) e_count ON s.id = e_count.schedule_id
-    WHERE s.status != 'cancelled' ${dateFilter}
+    WHERE s.status != 'cancelled' ${sDateClause}
     GROUP BY s.start_time
     ORDER BY s.start_time
-  `).all(queryParams)
+  `).all(params)
 
   return timeSlots
 }
 
 export async function exportReport(params: any, filePath: string) {
-  const db = getDb()
-  const { startDate, endDate, reportType } = params
+  const { startDate, endDate } = params
 
   const workbook = new ExcelJS.Workbook()
   workbook.creator = '健身中心排课系统'
   workbook.created = new Date()
 
-  const overviewData = getOverviewStatistics(
-    startDate || endDate 
-      ? ` AND s.date >= @startDate AND s.date <= @endDate` 
-      : '',
-    { startDate, endDate }
-  )
+  const overviewData = getOverviewStatistics(startDate, endDate)
 
   const overviewSheet = workbook.addWorksheet('概览')
   overviewSheet.columns = [
@@ -235,12 +220,7 @@ export async function exportReport(params: any, filePath: string) {
   overviewSheet.addRow({ metric: '活跃会员数', value: overviewData.totalMembers })
   overviewSheet.addRow({ metric: '在职教练数', value: overviewData.totalCoaches })
 
-  const courseData = getCourseStatistics(
-    startDate || endDate 
-      ? ` AND s.date >= @startDate AND s.date <= @endDate` 
-      : '',
-    { startDate, endDate }
-  )
+  const courseData = getCourseStatistics(startDate, endDate)
 
   const courseSheet = workbook.addWorksheet('课程统计')
   courseSheet.columns = [
@@ -261,12 +241,7 @@ export async function exportReport(params: any, filePath: string) {
     })
   })
 
-  const coachData = getCoachStatistics(
-    startDate || endDate 
-      ? ` AND s.date >= @startDate AND s.date <= @endDate` 
-      : '',
-    { startDate, endDate }
-  )
+  const coachData = getCoachStatistics(startDate, endDate)
 
   const coachSheet = workbook.addWorksheet('教练统计')
   coachSheet.columns = [

@@ -111,6 +111,7 @@ const EnrollmentManagement = () => {
     try {
       const result = await api.releaseNoShows()
       alert(`已释放 ${result.releasedCount} 个名额`)
+      loadSchedules()
       if (selectedSchedule) {
         loadEnrollments(selectedSchedule.id)
       }
