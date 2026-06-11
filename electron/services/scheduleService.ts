@@ -242,12 +242,17 @@ export function generateSchedule(date: string) {
 
   const generatedSchedules: any[] = []
   const coachDailyLoad: Record<string, number> = {}
+  const coachGroupLoad: Record<string, number> = {}
   const coachTimeSlots: Record<string, string[]> = {}
   const zoneScheduleMap: Record<string, any[]> = {}
   const memberPrivateScheduled: Record<string, boolean> = {}
+  const timeSlotGroupCoaches: Record<string, string[]> = {}
+
+  TIME_SLOTS.forEach(t => { timeSlotGroupCoaches[t] = [] })
 
   coaches.forEach(coach => {
     coachDailyLoad[coach.id] = 0
+    coachGroupLoad[coach.id] = 0
     coachTimeSlots[coach.id] = []
   })
   zones.forEach(zone => {
@@ -265,39 +270,62 @@ export function generateSchedule(date: string) {
     )
   }
 
-  function isCoachAvailable(coachId: string, startTime: string, endTime: string) {
+  function isCoachAvailable(coachId: string, startTime: string, endTime: string, isGroup: boolean = false) {
     const coach = coaches.find(c => c.id === coachId)
     if (!coach) return false
     if (coachDailyLoad[coachId] >= coach.max_daily_classes) return false
+    
+    if (isGroup) {
+      const maxGroupClasses = Math.max(1, Math.floor(coach.max_daily_classes * 0.6))
+      if (coachGroupLoad[coachId] >= maxGroupClasses) return false
+    }
     
     const slots = coachTimeSlots[coachId] || []
     return !slots.some(slot => isTimeOverlap(startTime, endTime, slot.split('-')[0], slot.split('-')[1]))
   }
 
-  function reserveCoachTime(coachId: string, startTime: string, endTime: string) {
+  function reserveCoachTime(coachId: string, startTime: string, endTime: string, isGroup: boolean = false) {
     if (!coachTimeSlots[coachId]) coachTimeSlots[coachId] = []
     coachTimeSlots[coachId].push(`${startTime}-${endTime}`)
+    if (isGroup) coachGroupLoad[coachId]++
   }
 
   function findCoachForCourse(course: any, startTime: string, endTime: string, isPrivate: boolean = false) {
+    const isGroup = !isPrivate
+
+    if (isGroup) {
+      const usedInSlot = timeSlotGroupCoaches[startTime] || []
+      if (usedInSlot.length >= Math.max(1, coaches.length - 2)) {
+        return null
+      }
+    }
+
     const suitableCoaches = coaches.filter(coach => {
       let specialties: string[] = []
       try { specialties = JSON.parse(coach.specialties || '[]') } catch {}
       return specialties.includes(course.name) || specialties.includes(course.type)
     })
 
-    if (suitableCoaches.length === 0) {
-      return coaches.find(c => isCoachAvailable(c.id, startTime, endTime)) || null
-    }
+    let availableCoach = null
 
-    suitableCoaches.sort((a, b) => coachDailyLoad[a.id] - coachDailyLoad[b.id])
-
-    for (const coach of suitableCoaches) {
-      if (isCoachAvailable(coach.id, startTime, endTime)) {
-        return coach
+    if (suitableCoaches.length > 0) {
+      suitableCoaches.sort((a, b) => coachDailyLoad[a.id] - coachDailyLoad[b.id])
+      for (const coach of suitableCoaches) {
+        if (isCoachAvailable(coach.id, startTime, endTime, isGroup)) {
+          availableCoach = coach
+          break
+        }
       }
     }
-    return null
+
+    if (!availableCoach) {
+      availableCoach = coaches.find(c => isCoachAvailable(c.id, startTime, endTime, isGroup)) || null
+    }
+
+    if (availableCoach && isGroup) {
+      timeSlotGroupCoaches[startTime].push(availableCoach.id)
+    }
+    return availableCoach
   }
 
   function findZoneForCourse(course: any, startTime: string, endTime: string, isPrivate: boolean = false) {
@@ -364,7 +392,6 @@ export function generateSchedule(date: string) {
 
   function isMemberMatchPrivateCourse(member: any, course: any): boolean {
     const prefs = getMemberPreferences(member)
-    if (prefs.length === 0) return true
     return prefs.includes('私教') || prefs.includes(course.name) || prefs.includes(course.type)
   }
 
@@ -373,8 +400,13 @@ export function generateSchedule(date: string) {
       deleteSchedulesByDate(date)
     }
 
+    const slotCourseDone: Record<string, Set<string>> = {}
+    TIME_SLOTS.forEach(t => { slotCourseDone[t] = new Set() })
+
     for (const timeSlot of TIME_SLOTS) {
       for (const course of groupCourses) {
+        if (slotCourseDone[timeSlot].has(course.id)) continue
+
         const endTime = calculateEndTime(timeSlot, course.duration)
         
         const coach = findCoachForCourse(course, timeSlot, endTime, false)
@@ -401,8 +433,9 @@ export function generateSchedule(date: string) {
 
         generatedSchedules.push(schedule)
         coachDailyLoad[coach.id]++
-        reserveCoachTime(coach.id, timeSlot, endTime)
+        reserveCoachTime(coach.id, timeSlot, endTime, true)
         zoneScheduleMap[zone.id].push({ start_time: timeSlot, end_time: endTime })
+        slotCourseDone[timeSlot].add(course.id)
       }
     }
 

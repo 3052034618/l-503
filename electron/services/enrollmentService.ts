@@ -204,9 +204,9 @@ export function releaseNoShows() {
   const now = new Date()
 
   const schedules = db.prepare(`
-    SELECT s.id, s.date, s.start_time, s.capacity, s.enrolled_count
+    SELECT s.id, s.date, s.start_time, s.status
     FROM schedules s
-    WHERE s.status = 'confirmed'
+    WHERE s.status IN ('confirmed', 'in_progress')
   `).all() as any[]
 
   let releasedCount = 0
@@ -214,21 +214,21 @@ export function releaseNoShows() {
   const tx = db.transaction(() => {
     for (const schedule of schedules) {
       const scheduleDateTime = new Date(`${schedule.date}T${schedule.start_time}:00`)
-      if (now.getTime() - scheduleDateTime.getTime() > 6 * 60 * 60 * 1000) {
-        const noShows = db.prepare(`
-          SELECT * FROM enrollments 
-          WHERE schedule_id = ? AND status = 'enrolled' AND is_waitlist = 0
-        `).all(schedule.id) as any[]
+      if (now.getTime() - scheduleDateTime.getTime() <= 6 * 60 * 60 * 1000) continue
 
-        for (const enrollment of noShows) {
-          db.prepare("UPDATE enrollments SET status = 'no_show' WHERE id = ?").run(enrollment.id)
-          db.prepare('UPDATE schedules SET enrolled_count = enrolled_count - 1 WHERE id = ?').run(schedule.id)
-          releasedCount++
-        }
+      const noShows = db.prepare(`
+        SELECT * FROM enrollments 
+        WHERE schedule_id = ? AND status = 'enrolled' AND is_waitlist = 0
+      `).all(schedule.id) as any[]
 
-        for (let i = 0; i < noShows.length; i++) {
-          promoteFirstWaitlist(schedule.id)
-        }
+      for (const enrollment of noShows) {
+        db.prepare("UPDATE enrollments SET status = 'no_show' WHERE id = ?").run(enrollment.id)
+        db.prepare('UPDATE schedules SET enrolled_count = enrolled_count - 1 WHERE id = ?').run(schedule.id)
+        releasedCount++
+      }
+
+      for (let i = 0; i < noShows.length; i++) {
+        promoteFirstWaitlist(schedule.id)
       }
     }
   })

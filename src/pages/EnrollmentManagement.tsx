@@ -59,6 +59,33 @@ const EnrollmentManagement = () => {
     }
   }
 
+  const refreshBoth = async (currentScheduleId?: string) => {
+    try {
+      const sResult = await api.getSchedules({
+        date: selectedDate,
+        status: 'confirmed'
+      })
+      setSchedules(sResult.list)
+
+      const targetId = currentScheduleId || selectedSchedule?.id
+      if (targetId) {
+        const updatedSchedule = sResult.list.find((s: Schedule) => s.id === targetId)
+        if (updatedSchedule) {
+          setSelectedSchedule(updatedSchedule)
+          await loadEnrollments(targetId)
+        } else if (sResult.list.length > 0) {
+          setSelectedSchedule(sResult.list[0])
+          await loadEnrollments(sResult.list[0].id)
+        } else {
+          setSelectedSchedule(null)
+          setEnrollments([])
+        }
+      }
+    } catch (error) {
+      console.error('Failed to refresh data:', error)
+    }
+  }
+
   const handleEnroll = async () => {
     if (!selectedMember || !selectedSchedule) {
       alert('请选择会员和课程')
@@ -69,9 +96,8 @@ const EnrollmentManagement = () => {
       const result = await api.enrollCourse(selectedMember, selectedSchedule.id)
       if (result.success) {
         alert(result.message)
-        loadEnrollments(selectedSchedule.id)
-        loadSchedules()
         setSelectedMember('')
+        await refreshBoth(selectedSchedule.id)
       } else {
         alert(result.message)
       }
@@ -84,7 +110,7 @@ const EnrollmentManagement = () => {
     try {
       const result = await api.checkInMember(enrollmentId)
       if (result.success) {
-        loadEnrollments(selectedSchedule!.id)
+        await refreshBoth(selectedSchedule!.id)
       } else {
         alert(result.message)
       }
@@ -98,8 +124,7 @@ const EnrollmentManagement = () => {
     
     try {
       await api.cancelEnrollment(enrollmentId)
-      loadEnrollments(selectedSchedule!.id)
-      loadSchedules()
+      await refreshBoth(selectedSchedule!.id)
     } catch (error) {
       console.error('Failed to cancel enrollment:', error)
     }
@@ -111,10 +136,7 @@ const EnrollmentManagement = () => {
     try {
       const result = await api.releaseNoShows()
       alert(`已释放 ${result.releasedCount} 个名额`)
-      loadSchedules()
-      if (selectedSchedule) {
-        loadEnrollments(selectedSchedule.id)
-      }
+      await refreshBoth(selectedSchedule?.id)
     } catch (error) {
       console.error('Failed to release no shows:', error)
     }
